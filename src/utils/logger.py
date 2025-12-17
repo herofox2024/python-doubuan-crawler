@@ -25,7 +25,8 @@ logger.add(
     level="INFO",
     colorize=True,
     backtrace=True,
-    diagnose=True
+    diagnose=True,
+    catch=True  # 捕获并处理日志输出中的异常
 )
 
 # 添加文件输出（按天滚动）

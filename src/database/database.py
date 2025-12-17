@@ -1,5 +1,4 @@
 import sqlite3
-import os
 from datetime import datetime
 from typing import List, Optional, Tuple, Dict
 from src.utils.logger import logger

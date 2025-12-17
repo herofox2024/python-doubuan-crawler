@@ -7,6 +7,7 @@ import os
 import sys
 from src.database.database import DoubanBookDB
 from src.exporter.html_exporter import HTMLExporter
+from src.exporter.csv_exporter import CSVExporter
 
 def test_database():
     """测试数据库功能"""
@@ -85,9 +86,43 @@ def test_html_export():
         print(f"   [FAIL] HTML导出测试失败: {e}")
         return False
 
+def test_csv_export():
+    """测试CSV导出功能"""
+    print("3. 测试CSV导出功能...")
+    
+    try:
+        db = DoubanBookDB()
+        exporter = CSVExporter()
+        
+        # 检查是否有测试数据
+        stats = db.get_user_stats("test_user")
+        if stats['total_books'] == 0:
+            print("   ! 没有测试数据，跳过CSV导出测试")
+            return True
+        
+        # 导出CSV
+        output_file = "test_export.csv"
+        success = exporter.export_user_books(db, "test_user", output_file)
+        
+        if success and os.path.exists(output_file):
+            print(f"   [OK] CSV导出成功: {output_file}")
+            print(f"   [OK] 文件大小: {os.path.getsize(output_file)} 字节")
+            
+            # 清理测试文件
+            os.remove(output_file)
+            print("   [OK] 测试文件已清理")
+            return True
+        else:
+            print("   [FAIL] CSV导出失败")
+            return False
+            
+    except Exception as e:
+        print(f"   [FAIL] CSV导出测试失败: {e}")
+        return False
+
 def test_gui_import():
     """测试GUI模块导入"""
-    print("3. 测试GUI模块导入...")
+    print("4. 测试GUI模块导入...")
     
     try:
         import tkinter as tk
@@ -105,7 +140,7 @@ def test_gui_import():
 
 def test_crawler_import():
     """测试爬虫模块导入"""
-    print("4. 测试爬虫模块导入...")
+    print("5. 测试爬虫模块导入...")
     
     try:
         from src.crawler.crawler import DoubanCrawler
@@ -122,7 +157,7 @@ def test_crawler_import():
 
 def cleanup_test_data():
     """清理测试数据"""
-    print("5. 清理测试数据...")
+    print("6. 清理测试数据...")
     
     try:
         db = DoubanBookDB()
@@ -140,7 +175,8 @@ def main():
     
     tests = [
         test_database,
-        test_html_export, 
+        test_html_export,
+        test_csv_export,
         test_gui_import,
         test_crawler_import,
         cleanup_test_data

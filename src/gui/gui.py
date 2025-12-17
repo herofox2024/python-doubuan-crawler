@@ -2,6 +2,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
 import os
+import base64
+import json
 from datetime import datetime
 from src.database.database import DoubanBookDB
 from src.exporter.html_exporter import HTMLExporter
@@ -22,6 +24,11 @@ class DoubanBookGUI:
         # 爬虫状态
         self.is_crawling = False
         self.crawl_thread = None
+        self._progress_thread = None
+        self.export_running = False
+        
+        # 配置参数
+        self._progress_update_interval = 0.05  # 进度条更新间隔（秒）
         
         self.setup_ui()
         
@@ -127,9 +134,24 @@ class DoubanBookGUI:
         self.end_month_var.trace_add("write", self._handle_option_change)
         self.end_day_var.trace_add("write", self._handle_option_change)
         
+        # 调试选项
+        debug_frame = ttk.Frame(main_frame)
+        debug_frame.grid(row=7, column=0, columnspan=4, pady=10, sticky=(tk.W, tk.E))
+        
+        self.save_debug_pages_var = tk.BooleanVar(value=False)
+        self.save_debug_pages_check = ttk.Checkbutton(
+            debug_frame, 
+            text="保存调试页面", 
+            variable=self.save_debug_pages_var,
+            onvalue=True, 
+            offvalue=False
+        )
+        self.save_debug_pages_check.grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Label(debug_frame, text="(开启后会保存每页HTML内容到debug_page_*.html文件)").grid(row=0, column=1, sticky=tk.W, padx=5)
+        
         # 按钮区域
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=7, column=0, columnspan=4, pady=20, sticky=(tk.W, tk.E))
+        button_frame.grid(row=8, column=0, columnspan=4, pady=20, sticky=(tk.W, tk.E))
         button_frame.columnconfigure(0, weight=1)
         button_frame.columnconfigure(1, weight=1)
         button_frame.columnconfigure(2, weight=1)
@@ -149,7 +171,7 @@ class DoubanBookGUI:
         
         # 进度显示区域
         progress_frame = ttk.LabelFrame(main_frame, text="进度信息", padding="10")
-        progress_frame.grid(row=8, column=0, columnspan=4, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
+        progress_frame.grid(row=9, column=0, columnspan=4, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
         progress_frame.columnconfigure(0, weight=1)
         
         # 进度条
@@ -165,7 +187,7 @@ class DoubanBookGUI:
         
         # 日志显示区域
         log_frame = ttk.LabelFrame(main_frame, text="运行日志", padding="10")
-        log_frame.grid(row=9, column=0, columnspan=4, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
+        log_frame.grid(row=10, column=0, columnspan=4, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         
@@ -178,11 +200,11 @@ class DoubanBookGUI:
         scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         
         # 设置网格权重
-        main_frame.rowconfigure(9, weight=1)
+        main_frame.rowconfigure(10, weight=1)
         
         # 统计信息区域
         stats_frame = ttk.LabelFrame(main_frame, text="用户统计", padding="10")
-        stats_frame.grid(row=10, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=10)
+        stats_frame.grid(row=11, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=10)
         
         self.stats_var = tk.StringVar(value="请输入用户名并开始爬取")
         self.stats_label = ttk.Label(stats_frame, textvariable=self.stats_var, 
@@ -195,29 +217,20 @@ class DoubanBookGUI:
     def export_csv(self):
         """导出CSV文件，带动态进度条"""
         user_id = self.user_id_var.get().strip()
-        if not user_id:
-            messagebox.showerror("错误", "请先输入用户名！")
+        if not self._validate_export_data(user_id):
             return
         
-        # 获取日期范围（年-月-日格式）
-        start_year = self.start_year_var.get().strip()
-        start_month = self.start_month_var.get().strip()
-        start_day = self.start_day_var.get().strip()
-        end_year = self.end_year_var.get().strip()
-        end_month = self.end_month_var.get().strip()
-        end_day = self.end_day_var.get().strip()
+        start_date, end_date = self._get_date_range()
+        if start_date == "" and end_date == "" and (
+            self.start_year_var.get().strip() or 
+            self.start_month_var.get().strip() or 
+            self.start_day_var.get().strip() or
+            self.end_year_var.get().strip() or 
+            self.end_month_var.get().strip() or 
+            self.end_day_var.get().strip()
+        ):
+            return  # 日期验证失败，已显示错误信息
         
-        # 组合成完整日期
-        start_date = f"{start_year}-{start_month}-{start_day}" if (start_year and start_month and start_day) else ""
-        end_date = f"{end_year}-{end_month}-{end_day}" if (end_year and end_month and end_day) else ""
-        
-        # 检查是否有数据
-        stats = self.db.get_user_stats(user_id)
-        if stats['total_books'] == 0:
-            messagebox.showwarning("警告", "没有找到该用户的书籍数据，请先爬取！")
-            return
-        
-        # 选择保存位置
         filename = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")],
@@ -225,55 +238,62 @@ class DoubanBookGUI:
         )
         
         if filename:
-            try:
-                self.update_status("正在导出CSV...")
-                
-                # 启动动态进度条线程
-                import threading
-                self.export_progress = 0
-                self.export_running = True
-                
-                def update_progress_bar():
-                    """动态更新进度条"""
-                    while self.export_running:
-                        self.export_progress += 1
-                        if self.export_progress > 100:
-                            self.export_progress = 100
-                        self.update_progress(self.export_progress)
-                        import time
-                        time.sleep(0.05)  # 控制进度条速度
-                
-                progress_thread = threading.Thread(target=update_progress_bar)
-                progress_thread.daemon = True  # 后台线程，主程序退出时自动结束
-                progress_thread.start()
-                
-                # 执行导出
-                success = self.csv_exporter.export_user_books(
-                    self.db, user_id, filename, start_date, end_date
-                )
-                
-                # 导出完成，停止进度条
-                self.export_running = False
-                self.update_progress(100)
-                
-                if success:
-                    self.update_status("CSV导出完成")
-                    self.log(f"CSV文件已保存到: {filename}")
-                    messagebox.showinfo("成功", f"CSV文件已导出到:\n{filename}")
-                    
-                    # 导出完成后重置UI
-                    self._reset_export_ui()
-                else:
-                    self.update_status("CSV导出失败")
-                    messagebox.showerror("错误", "CSV导出失败，请查看日志信息")
-            except Exception as e:
-                self.export_running = False
-                self.update_progress(0)
-                self.update_status("CSV导出失败")
-                self.log(f"CSV导出失败: {e}")
-                messagebox.showerror("错误", f"CSV导出失败: {e}")
+            self._export_with_progress("CSV", filename, user_id, start_date, end_date, self.csv_exporter)
     
 
+    
+    def _export_with_progress(self, export_type, filename, user_id, start_date, end_date, exporter):
+        """通用导出方法，带进度条"""
+        try:
+            self.update_status(f"正在导出{export_type}...")
+            
+            # 启动动态进度条线程
+            self._start_progress_thread()
+            
+            # 在独立线程中执行导出
+            def export_worker():
+                try:
+                    success = exporter.export_user_books(
+                        self.db, user_id, filename, start_date, end_date
+                    )
+                    
+                    # 在主线程中更新UI
+                    self.root.after(0, lambda: self._handle_export_result(success, filename, export_type))
+                except Exception as e:
+                    self.root.after(0, lambda: self._handle_export_error(e, export_type))
+            
+            export_thread = threading.Thread(target=export_worker, daemon=True)
+            export_thread.start()
+            
+        except Exception as e:
+            self.export_running = False
+            self.update_progress(0)
+            self.update_status(f"{export_type}导出失败")
+            self.log(f"{export_type}导出失败: {e}")
+            messagebox.showerror("错误", f"{export_type}导出失败: {e}")
+    
+    def _handle_export_result(self, success, filename, export_type):
+        """处理导出结果"""
+        # 导出完成，停止进度条
+        self.export_running = False
+        self.update_progress(100)
+        
+        if success:
+            self.update_status(f"{export_type}导出完成")
+            self.log(f"{export_type}文件已保存到: {filename}")
+            messagebox.showinfo("成功", f"{export_type}文件已导出到:\n{filename}")
+            self._reset_export_ui()
+        else:
+            self.update_status(f"{export_type}导出失败")
+            messagebox.showerror("错误", f"{export_type}导出失败，请查看日志信息")
+    
+    def _handle_export_error(self, error, export_type):
+        """处理导出错误"""
+        self.export_running = False
+        self.update_progress(0)
+        self.update_status(f"{export_type}导出失败")
+        self.log(f"{export_type}导出失败: {error}")
+        messagebox.showerror("错误", f"{export_type}导出失败: {error}")
     
     def show_cookie_help(self):
         """显示Cookie获取帮助"""
@@ -292,30 +312,121 @@ class DoubanBookGUI:
         
         messagebox.showinfo("Cookie获取帮助", help_text)
     
+    def _validate_date(self, year, month, day):
+        """验证日期有效性"""
+        if not year or not month or not day:
+            return True  # 空日期是有效的
+        
+        try:
+            datetime.strptime(f"{year}-{month}-{day}", "%Y-%m-%d")
+            return True
+        except ValueError:
+            return False
+    
+    def _get_date_range(self):
+        """获取日期范围字符串"""
+        start_parts = [
+            self.start_year_var.get().strip(),
+            self.start_month_var.get().strip(),
+            self.start_day_var.get().strip()
+        ]
+        end_parts = [
+            self.end_year_var.get().strip(),
+            self.end_month_var.get().strip(),
+            self.end_day_var.get().strip()
+        ]
+        
+        # 验证日期有效性
+        if all(start_parts) and not self._validate_date(*start_parts):
+            messagebox.showerror("错误", "开始日期无效")
+            return "", ""
+        
+        if all(end_parts) and not self._validate_date(*end_parts):
+            messagebox.showerror("错误", "结束日期无效")
+            return "", ""
+        
+        start_date = "-".join(start_parts) if all(start_parts) else ""
+        end_date = "-".join(end_parts) if all(end_parts) else ""
+        return start_date, end_date
+    
+    def _validate_export_data(self, user_id):
+        """验证导出数据"""
+        if not user_id:
+            messagebox.showerror("错误", "请先输入用户名！")
+            return False
+        
+        stats = self.db.get_user_stats(user_id)
+        if stats['total_books'] == 0:
+            messagebox.showwarning("警告", "没有找到该用户的书籍数据，请先爬取！")
+            return False
+        return True
+    
+    def _start_progress_thread(self):
+        """启动进度条线程"""
+        # 确保之前的进度线程已清理
+        if self._progress_thread and self._progress_thread.is_alive():
+            self.export_running = False
+            self._progress_thread.join(timeout=1.0)
+        
+        self.export_progress = 0
+        self.export_running = True
+        
+        def update_progress_bar():
+            while self.export_running:
+                self.export_progress = min(100, self.export_progress + 1)
+                self.update_progress(self.export_progress)
+                import time
+                time.sleep(self._progress_update_interval)
+        
+        self._progress_thread = threading.Thread(target=update_progress_bar, daemon=True)
+        self._progress_thread.start()
+    
     def _handle_option_change(self, *args):
         """处理选项变化，移除互斥关系，日期范围只在导出时使用"""
         # 不再禁用任何输入，让用户可以同时设置最大页数和日期范围
         # 最大页数用于爬取，日期范围只用于导出
         pass
     
+    def _get_config_path(self):
+        """获取配置文件路径"""
+        config_dir = os.path.expanduser('~/.douban_crawler')
+        os.makedirs(config_dir, exist_ok=True)
+        return os.path.join(config_dir, 'config.enc')
+    
+    def _encode_cookie(self, cookie):
+        """简单编码Cookie（仅用于隐藏，非加密）"""
+        return base64.b64encode(cookie.encode('utf-8')).decode('utf-8')
+    
+    def _decode_cookie(self, encoded_cookie):
+        """解码Cookie"""
+        try:
+            return base64.b64decode(encoded_cookie.encode('utf-8')).decode('utf-8')
+        except:
+            return ""
+    
     def load_config(self):
         """加载保存的配置"""
         try:
-            if os.path.exists('gui_config.txt'):
-                with open('gui_config.txt', 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                    if len(lines) >= 2:
-                        self.user_id_var.set(lines[0].strip())
-                        self.cookie_var.set(lines[1].strip())
+            config_path = self._get_config_path()
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    self.user_id_var.set(config.get('user_id', ''))
+                    encoded_cookie = config.get('cookie', '')
+                    self.cookie_var.set(self._decode_cookie(encoded_cookie))
         except Exception as e:
             self.log(f"加载配置失败: {e}")
     
     def save_config(self):
         """保存配置"""
         try:
-            with open('gui_config.txt', 'w', encoding='utf-8') as f:
-                f.write(f"{self.user_id_var.get()}\n")
-                f.write(f"{self.cookie_var.get()}\n")
+            config_path = self._get_config_path()
+            config = {
+                'user_id': self.user_id_var.get(),
+                'cookie': self._encode_cookie(self.cookie_var.get())
+            }
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f)
         except Exception as e:
             self.log(f"保存配置失败: {e}")
     
@@ -427,7 +538,7 @@ class DoubanBookGUI:
             # 导入爬虫模块
             from src.crawler.crawler import DoubanCrawler
             
-            crawler = DoubanCrawler(self.db, self)
+            crawler = DoubanCrawler(self.db, self, save_debug_pages=self.save_debug_pages_var.get())
             crawler.crawl_user_books(user_id, cookie, max_pages, start_date, end_date)
             
         except Exception as e:
@@ -453,29 +564,20 @@ class DoubanBookGUI:
     def export_html(self):
         """导出HTML文件，带动态进度条"""
         user_id = self.user_id_var.get().strip()
-        if not user_id:
-            messagebox.showerror("错误", "请先输入用户名！")
+        if not self._validate_export_data(user_id):
             return
         
-        # 获取日期范围（年-月-日格式）
-        start_year = self.start_year_var.get().strip()
-        start_month = self.start_month_var.get().strip()
-        start_day = self.start_day_var.get().strip()
-        end_year = self.end_year_var.get().strip()
-        end_month = self.end_month_var.get().strip()
-        end_day = self.end_day_var.get().strip()
+        start_date, end_date = self._get_date_range()
+        if start_date == "" and end_date == "" and (
+            self.start_year_var.get().strip() or 
+            self.start_month_var.get().strip() or 
+            self.start_day_var.get().strip() or
+            self.end_year_var.get().strip() or 
+            self.end_month_var.get().strip() or 
+            self.end_day_var.get().strip()
+        ):
+            return  # 日期验证失败，已显示错误信息
         
-        # 组合成完整日期
-        start_date = f"{start_year}-{start_month}-{start_day}" if (start_year and start_month and start_day) else ""
-        end_date = f"{end_year}-{end_month}-{end_day}" if (end_year and end_month and end_day) else ""
-        
-        # 检查是否有数据
-        stats = self.db.get_user_stats(user_id)
-        if stats['total_books'] == 0:
-            messagebox.showwarning("警告", "没有找到该用户的书籍数据，请先爬取！")
-            return
-        
-        # 选择保存位置
         filename = filedialog.asksaveasfilename(
             defaultextension=".html",
             filetypes=[("HTML文件", "*.html"), ("所有文件", "*.*")],
@@ -483,53 +585,7 @@ class DoubanBookGUI:
         )
         
         if filename:
-            try:
-                self.update_status("正在导出HTML...")
-                
-                # 启动动态进度条线程
-                import threading
-                self.export_progress = 0
-                self.export_running = True
-                
-                def update_progress_bar():
-                    """动态更新进度条"""
-                    while self.export_running:
-                        self.export_progress += 1
-                        if self.export_progress > 100:
-                            self.export_progress = 100
-                        self.update_progress(self.export_progress)
-                        import time
-                        time.sleep(0.05)  # 控制进度条速度
-                
-                progress_thread = threading.Thread(target=update_progress_bar)
-                progress_thread.daemon = True  # 后台线程，主程序退出时自动结束
-                progress_thread.start()
-                
-                # 执行导出
-                success = self.html_exporter.export_user_books(
-                    self.db, user_id, filename, start_date, end_date
-                )
-                
-                # 导出完成，停止进度条
-                self.export_running = False
-                self.update_progress(100)
-                
-                if success:
-                    self.update_status("HTML导出完成")
-                    self.log(f"HTML文件已保存到: {filename}")
-                    messagebox.showinfo("成功", f"HTML文件已导出到:\n{filename}")
-                    
-                    # 导出完成后重置UI
-                    self._reset_export_ui()
-                else:
-                    self.update_status("HTML导出失败")
-                    messagebox.showerror("错误", "HTML导出失败，请查看日志信息")
-            except Exception as e:
-                self.export_running = False
-                self.update_progress(0)
-                self.update_status("HTML导出失败")
-                self.log(f"HTML导出失败: {e}")
-                messagebox.showerror("错误", f"HTML导出失败: {e}")
+            self._export_with_progress("HTML", filename, user_id, start_date, end_date, self.html_exporter)
     
     def _reset_export_ui(self):
         """导出完成后重置UI"""

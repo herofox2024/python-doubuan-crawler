@@ -11,10 +11,11 @@ from src.utils.logger import logger
 from fake_useragent import UserAgent
 
 class DoubanCrawler:
-    def __init__(self, db: DoubanBookDB, gui_callback=None):
+    def __init__(self, db: DoubanBookDB, gui_callback=None, save_debug_pages=False):
         self.db = db
         self.gui_callback = gui_callback
         self.is_running = True
+        self.save_debug_pages = save_debug_pages
         self.ua = UserAgent()
         # 初始化请求头池（确保获取PC版页面）
         self.headers_pool = [
@@ -71,7 +72,9 @@ class DoubanCrawler:
     def get_book_details(self, book_url, headers):
         """获取书籍详细信息：作者和出版年月"""
         try:
-            time.sleep(1)
+            # 符合豆瓣robots.txt的Crawl-delay: 5要求
+            detail_delay = random.uniform(5, 10)
+            time.sleep(detail_delay)
             
             # 确保请求头中的值都是ASCII字符
             safe_headers = {}
@@ -230,9 +233,9 @@ class DoubanCrawler:
         total_reviews = 0
         failed_pages = []
         max_retries = 5  # 增加重试次数
-        base_delay = 2  # 基础延迟
-        max_delay = 15  # 最大延迟
-        min_delay = 1  # 最小延迟
+        base_delay = 5  # 基础延迟（符合豆瓣robots.txt的Crawl-delay: 5要求）
+        max_delay = 20  # 最大延迟
+        min_delay = 3  # 最小延迟（确保请求延迟不低于5秒）
         max_retries_per_url = 3  # 每个URL的最大重试次数
         
         # 日期范围过滤标志
@@ -400,10 +403,11 @@ class DoubanCrawler:
             soup = BeautifulSoup(res.text, 'html.parser')
             
             # 保存页面内容到文件，用于调试
-            debug_file = f"debug_page_{page+1}.html"
-            with open(debug_file, 'w', encoding='utf-8') as f:
-                f.write(res.text)
-            self.log(f"  页面内容已保存到：{debug_file}")
+            if self.save_debug_pages:
+                debug_file = f"debug_page_{page+1}.html"
+                with open(debug_file, 'w', encoding='utf-8') as f:
+                    f.write(res.text)
+                self.log(f"  页面内容已保存到：{debug_file}")
             
             # 添加调试信息
             self.log(f"第{page+1}页解析结果：")

@@ -6,8 +6,8 @@
 
 import sys
 import os
+import re
 import argparse
-from pathlib import Path
 from src.utils.logger import logger
 
 def main():
@@ -55,8 +55,9 @@ def main():
     parser.add_argument(
         '--max-pages',
         type=int,
+        default=10,
         metavar='N',
-        help='最大爬取页数限制'
+        help='最大爬取页数限制（默认10）'
     )
     
     parser.add_argument(
@@ -67,18 +68,60 @@ def main():
     
     args = parser.parse_args()
     
+    # 参数验证
+    if args.max_pages is not None and args.max_pages <= 0:
+        logger.error("错误：最大页数必须大于0")
+        sys.exit(1)
+    
+    if args.output and not args.output.strip():
+        logger.error("错误：输出文件名不能为空")
+        sys.exit(1)
+    
     # 仅导出HTML
     if args.export:
-        export_html_only(args.export, args.output)
+        if not args.export or not args.export.strip():
+            logger.error("错误：用户ID不能为空")
+            sys.exit(1)
+        
+        # 验证用户ID格式（豆瓣用户ID通常是数字、字母或特定格式）
+        if not re.match(r'^[\w\-\.]+$', args.export.strip()):
+            logger.error("错误：无效的用户ID格式，只允许字母、数字、下划线、连字符和点")
+            sys.exit(1)
+        
+        try:
+            export_html_only(args.export.strip(), args.output)
+        except FileNotFoundError as e:
+            logger.error(f"文件或路径错误: {e}")
+            sys.exit(1)
+        except PermissionError as e:
+            logger.error(f"权限错误: {e}")
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"导出HTML时发生错误: {e}")
+            sys.exit(1)
         return
     
     # 命令行模式
     if args.cli:
-        run_cli_mode(args)
+        try:
+            run_cli_mode(args)
+        except KeyboardInterrupt:
+            logger.info("\n用户中断操作")
+            sys.exit(0)
+        except Exception as e:
+            logger.error(f"命令行模式运行错误: {e}")
+            sys.exit(1)
         return
     
     # 默认启动GUI界面
-    run_gui_mode()
+    try:
+        run_gui_mode()
+    except KeyboardInterrupt:
+        logger.info("\n用户中断操作")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"GUI界面启动错误: {e}")
+        sys.exit(1)
 
 def run_gui_mode():
     """启动GUI界面"""
